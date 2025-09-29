@@ -260,7 +260,7 @@ public class ImageDisplay {
         }
     }
 
-    public void showIms(String[] args){
+    public void showIms(String[] args, boolean showGui){
         String imagePath = args[0];
         int colorMode = Integer.parseInt(args[1]);
         int quantizationMode = Integer.parseInt(args[2]);
@@ -321,32 +321,40 @@ public class ImageDisplay {
         System.out.println("Parameters: <C=" + colorMode + ", M=" + quantizationMode + ", Q1=" + q1 + ", Q2=" + q2 + ", Q3=" + q3 + ">");
         System.out.println("Total Error: " + error);
 
-
-        frame = new JFrame();
-        GridBagLayout gLayout = new GridBagLayout();
-        frame.getContentPane().setLayout(gLayout);
-        lbIm1 = new JLabel(new ImageIcon(imgOne));
-        lbIm2 = new JLabel(new ImageIcon(imgTwo));
-        GridBagConstraints c = new GridBagConstraints();
-        c.fill = GridBagConstraints.HORIZONTAL;
-        c.anchor = GridBagConstraints.CENTER;
-        c.weightx = 0.5;
-        c.gridx = 0;
-        c.gridy = 0;
-        frame.getContentPane().add(lbIm1, c);
-        c.gridx = 1;
-        frame.getContentPane().add(lbIm2, c);
-        frame.pack();
-        frame.setVisible(true);
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        // Only show the GUI if requested
+        if (showGui) {
+            frame = new JFrame();
+            GridBagLayout gLayout = new GridBagLayout();
+            frame.getContentPane().setLayout(gLayout);
+            lbIm1 = new JLabel(new ImageIcon(imgOne));
+            lbIm2 = new JLabel(new ImageIcon(imgTwo));
+            GridBagConstraints c = new GridBagConstraints();
+            c.fill = GridBagConstraints.HORIZONTAL;
+            c.anchor = GridBagConstraints.CENTER;
+            c.weightx = 0.5;
+            c.gridx = 0;
+            c.gridy = 0;
+            frame.getContentPane().add(lbIm1, c);
+            c.gridx = 1;
+            frame.getContentPane().add(lbIm2, c);
+            frame.pack();
+            frame.setVisible(true);
+            frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        }
     }
 
     public static void main(String[] args) {
         if (args.length < 6) {
-            System.out.println("Usage: java ImageDisplay <image_path> <C> <M> <Q1> <Q2> <Q3>");
+            System.out.println("Usage: java ImageDisplay <image_path> <C> <M> <Q1> <Q2> <Q3> [--no-gui]");
             return;
         }
+
+        boolean showGui = true;
+        if (args.length > 6 && args[6].equals("--no-gui")) {
+            showGui = false;
+        }
+
         ImageDisplay ren = new ImageDisplay();
-        ren.showIms(args);
+        ren.showIms(args, showGui);
     }
 }
