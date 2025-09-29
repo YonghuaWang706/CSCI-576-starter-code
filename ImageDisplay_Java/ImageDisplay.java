@@ -102,9 +102,9 @@ public class ImageDisplay {
                 double g_double = yVal - 0.39465 * uVal - 0.58060 * vVal;
                 double b_double = yVal + 2.03211 * uVal;
 
-                int r = (int) Math.max(0, Math.min(255, r_double));
-                int g = (int) Math.max(0, Math.min(255, g_double));
-                int b = (int) Math.max(0, Math.min(255, b_double));
+                int r = (int) Math.round(Math.max(0, Math.min(255, r_double)));
+                int g = (int) Math.round(Math.max(0, Math.min(255, g_double)));
+                int b = (int) Math.round(Math.max(0, Math.min(255, b_double)));
 
                 int pix = 0xFF000000 | (r << 16) | (g << 8) | b;
                 rgbImage.setRGB(x, y, pix);
@@ -117,12 +117,11 @@ public class ImageDisplay {
      * Performs uniform quantization on a single color channel.
      */
     private void uniformQuantizeChannel(double[][] channel, int numBits, double minRange, double maxRange) {
-        if (numBits > 8) return; // Ignore invalid bit counts
+        if (numBits > 8) return;
 
-        // BUG FIX: Handle numBits = 0 case
         if (numBits == 0) {
             double neutralValue = (minRange + maxRange) / 2.0;
-            if (minRange < 0) neutralValue = 0; // For U/V, neutral is 0
+            if (minRange < 0) neutralValue = 0;
             for (int y = 0; y < channel.length; y++) {
                 for (int x = 0; x < channel[0].length; x++) {
                     channel[y][x] = neutralValue;
@@ -130,7 +129,7 @@ public class ImageDisplay {
             }
             return;
         }
-        if (numBits < 1) return; // Should not happen with the zero check, but good practice
+        if (numBits < 1) return;
 
         int levels = 1 << numBits;
         double step = (maxRange - minRange) / levels;
@@ -152,10 +151,9 @@ public class ImageDisplay {
     private void smartQuantizeChannel(double[][] channel, int numBits, int minRange, int maxRange) {
         if (numBits > 8) return;
 
-        // BUG FIX: Handle numBits = 0 case
         if (numBits == 0) {
             double neutralValue = (minRange + maxRange) / 2.0;
-            if (minRange < 0) neutralValue = 0; // For U/V, neutral is 0
+            if (minRange < 0) neutralValue = 0;
             for (int y = 0; y < channel.length; y++) {
                 for (int x = 0; x < channel[0].length; x++) {
                     channel[y][x] = neutralValue;
@@ -170,7 +168,6 @@ public class ImageDisplay {
         int[] histogram = new int[rangeSize];
         int totalPixels = channel.length * channel[0].length;
 
-        // 1. Build Histogram
         for (int y = 0; y < channel.length; y++) {
             for (int x = 0; x < channel[0].length; x++) {
                 int val = (int) Math.round(channel[y][x]);
@@ -185,7 +182,6 @@ public class ImageDisplay {
         boundaries[0] = 0;
         boundaries[levels] = rangeSize - 1;
 
-        // 2. Determine Boundaries based on equal pixel count per bin
         int pixelCount = 0;
         int binIndex = 1;
         for (int i = 0; i < rangeSize; i++) {
@@ -193,32 +189,41 @@ public class ImageDisplay {
             if (pixelCount >= pixelsPerBin && binIndex < levels) {
                 boundaries[binIndex] = i;
                 binIndex++;
-                pixelCount = 0; // Reset for next bin
+                pixelCount = 0;
             }
         }
 
-        // 3. Calculate Representative Centroids
         double[] representatives = new double[levels];
+        double[] lookupTable = new double[rangeSize];
+
+        // BUG FIX: Corrected loops to prevent double-counting boundaries.
         for (int i = 0; i < levels; i++) {
             long valueSum = 0;
             int countInBin = 0;
-            for (int j = boundaries[i]; j <= boundaries[i+1]; j++) {
+            // Start of the bin is inclusive. For bin 0, it's boundary 0. For others, it's one past the previous boundary.
+            int startJ = (i == 0) ? boundaries[i] : boundaries[i] + 1;
+            // The end of the bin is inclusive.
+            int endJ = boundaries[i+1];
+
+            for (int j = startJ; j <= endJ; j++) {
+                if (j < 0 || j >= rangeSize) continue; // Safety check
                 valueSum += (long) (j - offset) * histogram[j];
                 countInBin += histogram[j];
             }
-            if (countInBin > 0) {
-                representatives[i] = (double) valueSum / countInBin;
-            } else {
-                // Handle empty bin case - use midpoint of boundary
-                representatives[i] = ((boundaries[i] + boundaries[i+1]) / 2.0) - offset;
-            }
-        }
 
-        // 4. Create Lookup Table and 5. Apply Mapping
-        double[] lookupTable = new double[rangeSize];
-        for (int i = 0; i < levels; i++) {
-            for (int j = boundaries[i]; j <= boundaries[i+1]; j++) {
-                lookupTable[j] = representatives[i];
+            double repValue;
+            if (countInBin > 0) {
+                repValue = (double) valueSum / countInBin;
+            } else {
+                repValue = ((startJ + endJ) / 2.0) - offset;
+            }
+            representatives[i] = repValue;
+
+            // Populate lookup table for this bin
+            for (int j = startJ; j <= endJ; j++) {
+                if (j >= 0 && j < rangeSize) {
+                    lookupTable[j] = representatives[i];
+                }
             }
         }
 
@@ -316,12 +321,10 @@ public class ImageDisplay {
             imgTwo = convertToRGB(yuvImage);
         }
 
-        // Calculate and print the error
         long error = calculateError(imgOne, imgTwo);
         System.out.println("Parameters: <C=" + colorMode + ", M=" + quantizationMode + ", Q1=" + q1 + ", Q2=" + q2 + ", Q3=" + q3 + ">");
         System.out.println("Total Error: " + error);
 
-        // Only show the GUI if requested
         if (showGui) {
             frame = new JFrame();
             GridBagLayout gLayout = new GridBagLayout();
@@ -358,3 +361,4 @@ public class ImageDisplay {
         ren.showIms(args, showGui);
     }
 }
+
