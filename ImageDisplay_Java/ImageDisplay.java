@@ -168,6 +168,7 @@ public class ImageDisplay {
         int[] histogram = new int[rangeSize];
         int totalPixels = channel.length * channel[0].length;
 
+        //fill up the histogram
         for (int y = 0; y < channel.length; y++) {
             for (int x = 0; x < channel[0].length; x++) {
                 int val = (int) Math.round(channel[y][x]);
