@@ -16,6 +16,7 @@
 import argparse
 import math
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import List, Tuple
 from collections import Counter
 
@@ -26,6 +27,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import animation
 from matplotlib.animation import PillowWriter
+
+
+# ===================== 枚举：边的方向 =====================
+
+class Side(IntEnum):
+    """拼图块的边：0=上, 1=右, 2=下, 3=左"""
+    TOP = 0
+    RIGHT = 1
+    BOTTOM = 2
+    LEFT = 3
+
+
 
 
 # ===================== 工具函数：排序四个角点 =====================
@@ -65,25 +78,25 @@ class Piece:
     init_angle: float                 # 在原图中的角度（minAreaRect 角）
 
 
-def extract_edge_simple(img: np.ndarray, side: int, band: int = 5) -> EdgeFeature:
+def extract_edge_simple(img: np.ndarray, side: Side, band: int = 5) -> EdgeFeature:
     """
     从图像某一侧取一个竖/横向带状区域，求均值作为边缘特征。
-    side: 0=top, 1=right, 2=bottom, 3=left
+    side: Side enum (TOP, RIGHT, BOTTOM, LEFT)
     band: 带宽（像素）
     """
     h, w, _ = img.shape
     band = max(1, min(band, min(h, w) // 4))
 
-    if side == 0:        # top
+    if side == Side.TOP:
         strip = img[0:band, :, :]
         line = strip.mean(axis=0)      # (w, 3)
-    elif side == 2:      # bottom
+    elif side == Side.BOTTOM:
         strip = img[h-band:h, :, :]
         line = strip.mean(axis=0)
-    elif side == 3:      # left
+    elif side == Side.LEFT:
         strip = img[:, 0:band, :]
         line = strip.mean(axis=1)      # (h, 3)
-    else:                # right
+    else:  # Side.RIGHT
         strip = img[:, w-band:w, :]
         line = strip.mean(axis=1)
 
@@ -196,10 +209,10 @@ def straighten_and_extract_pieces(board_bgr: np.ndarray,
 
         # 提取 4 条边
         edges = [
-            extract_edge_simple(norm, 0),  # top
-            extract_edge_simple(norm, 1),  # right
-            extract_edge_simple(norm, 2),  # bottom
-            extract_edge_simple(norm, 3),  # left
+            extract_edge_simple(norm, Side.TOP),    # top
+            extract_edge_simple(norm, Side.RIGHT),  # right
+            extract_edge_simple(norm, Side.BOTTOM), # bottom
+            extract_edge_simple(norm, Side.LEFT),   # left
         ]
 
         pieces.append(Piece(
@@ -247,19 +260,19 @@ class TranslateBeamSolver:
         self._edge_cost_cache = {}
 
     def _pair_cost(self,
-                   pid_up: int, side_up: int,
-                   pid_down: int, side_down: int) -> float:
+                   pid_up: int, side_up: Side,
+                   pid_down: int, side_down: Side) -> float:
         """
         计算两块之间指定边的匹配代价，并做缓存。
-        side: 0 上, 1 右, 2 下, 3 左
+        side_up, side_down: Side enum (TOP, RIGHT, BOTTOM, LEFT)
         """
-        key = (pid_up, side_up, pid_down, side_down)
+        key = (pid_up, side_up.value, pid_down, side_down.value)
         if key in self._edge_cost_cache:
             return self._edge_cost_cache[key]
 
         p_up = self.id2piece[pid_up]
         p_down = self.id2piece[pid_down]
-        cost = edge_cost(p_up.edges[side_up], p_down.edges[side_down])
+        cost = edge_cost(p_up.edges[side_up.value], p_down.edges[side_down.value])
         self._edge_cost_cache[key] = cost
         return cost
 
@@ -289,14 +302,14 @@ class TranslateBeamSolver:
                     if r > 0:
                         up_pid = st.layout[(r - 1) * self.cols + c]
                         if up_pid >= 0:
-                            add_cost += self._pair_cost(up_pid, 2, p.id, 0)
+                            add_cost += self._pair_cost(up_pid, Side.BOTTOM, p.id, Side.TOP)
                             cnt += 1
 
                     # 左侧约束：左侧的右边 vs 当前的左边
                     if c > 0:
                         left_pid = st.layout[r * self.cols + (c - 1)]
                         if left_pid >= 0:
-                            add_cost += self._pair_cost(left_pid, 1, p.id, 3)
+                            add_cost += self._pair_cost(left_pid, Side.RIGHT, p.id, Side.LEFT)
                             cnt += 1
 
                     if cnt > 0:
