@@ -185,17 +185,40 @@ class PuzzleSolverV2:
         e = min(len(full_pixels), s + length)
         return full_pixels[s:e]
 
-    def compute_match_cost(self, pixels_a, pixels_b):
-        """Visual MSE cost weighted by gradient magnitude."""
+    # def compute_match_cost(self, pixels_a, pixels_b):
+    #     """Visual MSE cost weighted by gradient magnitude."""
+    #     if len(pixels_a) != len(pixels_b) or len(pixels_a) == 0:
+    #         return float('inf')
+    #
+    #     diff = pixels_a - pixels_b
+    #     mse = np.mean(diff ** 2)
+    #
+    #     # Optional: Add Gradient Profile check here for "Landmark" matching
+    #     # For V2, we stick to MSE but could weight it.
+    #     return mse
+
+    def compute_match_cost(self, pixels_a, pixels_b, edge_variance=0):
+        """
+        Computes MSE but normalizes it by the edge's variance (texture complexity).
+        We trust high-variance matches MORE than low-variance matches.
+        """
         if len(pixels_a) != len(pixels_b) or len(pixels_a) == 0:
             return float('inf')
 
         diff = pixels_a - pixels_b
         mse = np.mean(diff ** 2)
 
-        # Optional: Add Gradient Profile check here for "Landmark" matching
-        # For V2, we stick to MSE but could weight it.
-        return mse
+        # === NEW: Variance Normalization ===
+        # If the edge has high texture (variance), we tolerate higher MSE.
+        # If the edge is flat (low variance), we demand near-zero MSE.
+        # Formula: Adjusted_Cost = MSE / (1 + Weight * Variance)
+
+        # Sensitivity factor. Higher = prefer high-texture matches more aggressively.
+        TEXTURE_WEIGHT = 1.0
+
+        adjusted_cost = mse / (1.0 + TEXTURE_WEIGHT * edge_variance)
+
+        return adjusted_cost
 
     # ================= LOGIC 1: Zippering (Self-Healing) =================
 
@@ -321,18 +344,52 @@ class PuzzleSolverV2:
                 h_pixels = self.get_host_pixels(edge, 0, min(edge.length, cand_side_len))
                 c_pixels = cand.edge_features[req_cand_side].pixels[:len(h_pixels)]
 
-                cost = self.compute_match_cost(h_pixels, c_pixels)
+                # Re-calculate variance for the specific segment being matched
+                _, h_var = get_gradient_profile(h_pixels)
+
+                # Pass this variance to the cost function
+                cost = self.compute_match_cost(h_pixels, c_pixels, edge_variance=h_var)
+
+                # Check how many neighbors this candidate would touch if placed here
+                # We calculate the potential rectangle
+                nx, ny = 0, 0
+                if edge.axis == 'V':
+                    nx = edge.x if edge.direction == 1 else edge.x - cand.w
+                    ny = edge.y
+                else:
+                    nx = edge.x
+                    ny = edge.y if edge.direction == 1 else edge.y - cand.h
+
+                # Count neighbors touching the candidate's OTHER 3 sides
+                neighbors_found = 0
+                check_rect = (nx, ny, cand.w, cand.h)
+                tol = 2
+
+                # Scan all placed pieces to see if we touch them
+                for p in self.placed_pieces:
+                    # Don't count the host of the primary edge we are matching against
+                    if p.id == edge.host_piece_id: continue
+
+                    # Check for touch (intersection with tolerance)
+                    x_touch = max(0, min(nx + cand.w, p.placed_x + p.w) - max(nx, p.placed_x))
+                    y_touch = max(0, min(ny + cand.h, p.placed_y + p.h) - max(ny, p.placed_y))
+
+                    # If we touch significantly on any side
+                    if x_touch > 0 and y_touch > 0:  # This means overlap/touch
+                        neighbors_found += 1
+
+                # PENALTY RULE:
+                # If we only touch 1 neighbor (the primary edge), we are "Cantilevered".
+                # This is risky. Apply a penalty to the cost to discourage it
+                # unless the match is absolutely perfect.
+                if neighbors_found == 0:
+                    cost *= 2.0  # Double the cost (making it harder to be "Best")
+                else:
+                    cost *= 0.5  # Reward corners (halve the cost, making it preferred)
+
+                # =================================
 
                 if cost < best_cost:
-                    # Calculate placement
-                    nx, ny = 0, 0
-                    if edge.axis == 'V':
-                        nx = edge.x if edge.direction == 1 else edge.x - cand.w
-                        ny = edge.y
-                    else:
-                        nx = edge.x
-                        ny = edge.y if edge.direction == 1 else edge.y - cand.h
-
                     best_cost = cost
                     best_move = (uid, target_edges_chain, (nx, ny, cand.w, cand.h))
 
