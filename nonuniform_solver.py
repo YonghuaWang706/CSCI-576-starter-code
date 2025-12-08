@@ -9,7 +9,7 @@ from typing import List, Tuple, Optional, Dict
 # ================= Configuration =================
 VISUAL_DEBUG = True
 DEBUG_SCALE = 0.6
-STEP_SPEED_MS = 0  # 0 = Wait for keypress (Step-by-step mode)
+STEP_SPEED_MS = 10  # 0 = Wait for keypress (Step-by-step mode)
 MIN_EDGE_LEN = 10  # Minimum pixels to consider a valid edge
 MATCH_THRESHOLD = 3000.0  # Visual MSE threshold
 GRADIENT_WEIGHT = 2.0  # Multiplier for gradient-heavy areas
@@ -61,17 +61,27 @@ def get_gradient_profile(pixels: np.ndarray) -> Tuple[np.ndarray, float]:
     mag = np.abs(sobel).flatten()
     return mag, float(np.std(mag))
 
-
-def extract_edge_feature(img: np.ndarray, side: int) -> EdgeFeature:
+def extract_edge_feature(img: np.ndarray, side: int, is_tilted: bool) -> EdgeFeature:
     h, w = img.shape[:2]
+
+    # === DYNAMIC MARGIN ===
+    # If tilted, we skip 1px to avoid rotation artifacts (black halos).
+    # If straight, we use 0px to preserve every bit of valid texture data.
+    margin = 1 if is_tilted else 0
+
     if side == 0:  # Top
-        pixels = img[0, :, :]
+        pixels = img[margin, :, :]
     elif side == 1:  # Right
-        pixels = img[:, w - 1, :]
+        pixels = img[:, w - 1 - margin, :]
     elif side == 2:  # Bottom
-        pixels = img[h - 1, :, :]
+        pixels = img[h - 1 - margin, :, :]
     elif side == 3:  # Left
-        pixels = img[:, 0, :]
+        pixels = img[:, margin, :]
+
+    # Gaussian Blur (it helps robustness even on straight edges)
+    # Using a slightly smaller kernel for straight pieces is optional,
+    # but (3,1) is generally safe for everything.
+    pixels = cv2.GaussianBlur(pixels.reshape(1, -1, 3), (3, 1), 0).reshape(-1, 3)
 
     mag, var = get_gradient_profile(pixels)
     return EdgeFeature(pixels.astype(np.float32), mag, var, len(pixels))
@@ -119,23 +129,38 @@ class PuzzleSolverV2:
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         print(f"🔍 Found {len(contours)} contours")
+        is_tilted = False
+        for i, cnt in enumerate(contours):
+            if cv2.contourArea(cnt) < 500: continue
+            rect = cv2.minAreaRect(cnt)
+            angle = rect[2]  # Get the angle
+            # Check if piece is effectively straight (axis-aligned)
+            # OpenCV angles can be 0, 90, -90, etc. We check proximity to 90-degree intervals.
+            # We treat < 2.0 degrees deviation as "Straight".
+            is_straight = (abs(angle) < 2.0 or abs(angle - 90.0) < 2.0 or
+                           abs(angle + 90.0) < 2.0 or abs(angle - 180.0) < 2.0)
+            is_tilted = not is_straight
+            if is_tilted: break
         for i, cnt in enumerate(contours):
             if cv2.contourArea(cnt) < 500: continue
 
             rect = cv2.minAreaRect(cnt)
+
             box = order_points(cv2.boxPoints(rect))
 
-            # Perspective Transform (Straighten)
             (tl, tr, br, bl) = box
             width = int(max(np.linalg.norm(br - bl), np.linalg.norm(tr - tl)))
             height = int(max(np.linalg.norm(tr - br), np.linalg.norm(tl - bl)))
 
             dst_pts = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype="float32")
             M = cv2.getPerspectiveTransform(box, dst_pts)
-            warped = cv2.warpPerspective(self.original_img, M, (width, height))
+
+            # High-Quality Interpolation ===
+            # LANCZOS4 keeps edges sharper than the default LINEAR
+            warped = cv2.warpPerspective(self.original_img, M, (width, height), flags=cv2.INTER_LANCZOS4)
 
             p = Piece(id=i, image=warped, h=height, w=width)
-            p.edge_features = [extract_edge_feature(warped, s) for s in range(4)]
+            p.edge_features = [extract_edge_feature(warped, s, is_tilted) for s in range(4)]
 
             self.pieces.append(p)
             self.unused_ids.add(i)
