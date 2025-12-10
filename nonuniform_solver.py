@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
+from dataclasses import dataclass, field
+from typing import List, Tuple
+
 import cv2
 import numpy as np
-import heapq
-import math
-from dataclasses import dataclass, field
-from typing import List, Tuple, Optional, Dict
 
 # ================= Configuration =================
 VISUAL_DEBUG = True
 DEBUG_SCALE = 0.6
-STEP_SPEED_MS = 10  # 0 = Wait for keypress (Step-by-step mode)
+STEP_SPEED_MS = 0  # 0 = Wait for keypress (Step-by-step mode)
 MIN_EDGE_LEN = 10  # Minimum pixels to consider a valid edge
 MATCH_THRESHOLD = 3000.0  # Visual MSE threshold
 GRADIENT_WEIGHT = 2.0  # Multiplier for gradient-heavy areas
@@ -81,7 +80,13 @@ def extract_edge_feature(img: np.ndarray, side: int, is_tilted: bool) -> EdgeFea
     # Gaussian Blur (it helps robustness even on straight edges)
     # Using a slightly smaller kernel for straight pieces is optional,
     # but (3,1) is generally safe for everything.
-    pixels = cv2.GaussianBlur(pixels.reshape(1, -1, 3), (3, 1), 0).reshape(-1, 3)
+    # pixels = cv2.GaussianBlur(pixels.reshape(1, -1, 3), (3, 1), 0).reshape(-1, 3)
+    if is_tilted:
+        # Use (5, 5) to blur in both directions slightly, smoothing out the "grid" noise
+        pixels = cv2.GaussianBlur(pixels.reshape(1, -1, 3), (5, 5), 0).reshape(-1, 3)
+    else:
+        # Keep original light blur for translation integrity
+        pixels = cv2.GaussianBlur(pixels.reshape(1, -1, 3), (3, 1), 0).reshape(-1, 3)
 
     mag, var = get_gradient_profile(pixels)
     return EdgeFeature(pixels.astype(np.float32), mag, var, len(pixels))
@@ -144,23 +149,36 @@ class PuzzleSolverV2:
         for i, cnt in enumerate(contours):
             if cv2.contourArea(cnt) < 500: continue
 
-            rect = cv2.minAreaRect(cnt)
+            # --- A. NO-TILT PATH (CROP) ---
+            if not is_tilted:
+                # When the entire set is NOT tilted, we use bounding rect CROP for pixel perfection
+                x, y, w, h = cv2.boundingRect(cnt)
+                piece_img = self.original_img[y:y + h, x:x + w]
 
-            box = order_points(cv2.boxPoints(rect))
+                p = Piece(id=i, image=piece_img, h=h, w=w)
+                # is_tilted=False means margin=0 in extract_edge_feature
+                p.edge_features = [extract_edge_feature(piece_img, s, is_tilted=False) for s in range(4)]
 
-            (tl, tr, br, bl) = box
-            width = int(max(np.linalg.norm(br - bl), np.linalg.norm(tr - tl)))
-            height = int(max(np.linalg.norm(tr - br), np.linalg.norm(tl - bl)))
+            # --- B. TILTED PATH (WARP) ---
+            else:
 
-            dst_pts = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype="float32")
-            M = cv2.getPerspectiveTransform(box, dst_pts)
+                rect = cv2.minAreaRect(cnt)
 
-            # High-Quality Interpolation ===
-            # LANCZOS4 keeps edges sharper than the default LINEAR
-            warped = cv2.warpPerspective(self.original_img, M, (width, height), flags=cv2.INTER_LANCZOS4)
+                box = order_points(cv2.boxPoints(rect))
 
-            p = Piece(id=i, image=warped, h=height, w=width)
-            p.edge_features = [extract_edge_feature(warped, s, is_tilted) for s in range(4)]
+                (tl, tr, br, bl) = box
+                width = int(max(np.linalg.norm(br - bl), np.linalg.norm(tr - tl)))
+                height = int(max(np.linalg.norm(tr - br), np.linalg.norm(tl - bl)))
+
+                dst_pts = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype="float32")
+                M = cv2.getPerspectiveTransform(box, dst_pts)
+
+                # High-Quality Interpolation ===
+                # LANCZOS4 keeps edges sharper than the default LINEAR
+                warped = cv2.warpPerspective(self.original_img, M, (width, height), flags=cv2.INTER_LANCZOS4)
+
+                p = Piece(id=i, image=warped, h=height, w=width)
+                p.edge_features = [extract_edge_feature(warped, s, is_tilted) for s in range(4)]
 
             self.pieces.append(p)
             self.unused_ids.add(i)
@@ -210,18 +228,6 @@ class PuzzleSolverV2:
         e = min(len(full_pixels), s + length)
         return full_pixels[s:e]
 
-    # def compute_match_cost(self, pixels_a, pixels_b):
-    #     """Visual MSE cost weighted by gradient magnitude."""
-    #     if len(pixels_a) != len(pixels_b) or len(pixels_a) == 0:
-    #         return float('inf')
-    #
-    #     diff = pixels_a - pixels_b
-    #     mse = np.mean(diff ** 2)
-    #
-    #     # Optional: Add Gradient Profile check here for "Landmark" matching
-    #     # For V2, we stick to MSE but could weight it.
-    #     return mse
-
     def compute_match_cost(self, pixels_a, pixels_b, edge_variance=0):
         """
         Computes MSE but normalizes it by the edge's variance (texture complexity).
@@ -233,17 +239,24 @@ class PuzzleSolverV2:
         diff = pixels_a - pixels_b
         mse = np.mean(diff ** 2)
 
-        # === NEW: Variance Normalization ===
+        # Variance Clamping (Safety Rail)
+        # We cap variance at 200. This stops the Cafe Awning (Var 2000)
+        # from getting an unfair advantage.
+        # Awning (2000) -> 200. Flower (100) -> 100. Yellow (5) -> 5.
+        effective_var = min(edge_variance, 200.0)
+
+        # Variance Normalization ===
         # If the edge has high texture (variance), we tolerate higher MSE.
         # If the edge is flat (low variance), we demand near-zero MSE.
         # Formula: Adjusted_Cost = MSE / (1 + Weight * Variance)
 
         # Sensitivity factor. Higher = prefer high-texture matches more aggressively.
-        TEXTURE_WEIGHT = 1.0
+        TEXTURE_WEIGHT = 5.0
 
         adjusted_cost = mse / (1.0 + TEXTURE_WEIGHT * edge_variance)
 
         return adjusted_cost
+
 
     # ================= LOGIC 1: Zippering (Self-Healing) =================
 
@@ -408,7 +421,7 @@ class PuzzleSolverV2:
                 # This is risky. Apply a penalty to the cost to discourage it
                 # unless the match is absolutely perfect.
                 if neighbors_found == 0:
-                    cost *= 2.0  # Double the cost (making it harder to be "Best")
+                    cost *= 3.0  # Double the cost (making it harder to be "Best")
                 else:
                     cost *= 0.5  # Reward corners (halve the cost, making it preferred)
 
