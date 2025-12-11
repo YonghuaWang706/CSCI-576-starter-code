@@ -133,6 +133,10 @@ class PuzzleSolverV2:
         self.unused_ids = set()
         self.min_x, self.max_x = 0, 0
         self.min_y, self.max_y = 0, 0
+        self.seen_variances = []  # Store history (or just sum/count for speed)
+        self.dynamic_threshold = 10.0  # Start with a safe, low default
+        self.warmup_period = 50  # Don't apply penalties until we've seen 50 comparisons
+        self.variance_tracker_count = 0
 
     def rotate_image(self, image, angle):
         """
@@ -263,8 +267,21 @@ class PuzzleSolverV2:
         Computes MSE but normalizes it by the edge's variance (texture complexity).
         We trust high-variance matches MORE than low-variance matches.
         """
+
         if len(pixels_a) != len(pixels_b) or len(pixels_a) == 0:
             return float('inf')
+
+        # adjust variance gradually
+        # We record what "normal" variance looks like for these specific segments
+        if self.variance_tracker_count < 1000:  # Limit memory usage, stop learning eventually
+            self.seen_variances.append(edge_variance)
+            self.variance_tracker_count += 1
+
+            # Periodically update the threshold (e.g., every 10 calls)
+            if self.variance_tracker_count % 10 == 0:
+                # Set threshold to Median (robust against outliers)
+                self.dynamic_threshold = np.median(self.seen_variances) * 0.5
+
 
         diff = pixels_a - pixels_b
         mse = np.mean(diff ** 2)
@@ -283,7 +300,15 @@ class PuzzleSolverV2:
         # Sensitivity factor. Higher = prefer high-texture matches more aggressively.
         TEXTURE_WEIGHT = 5.0
 
-        adjusted_cost = mse / (1.0 + TEXTURE_WEIGHT * edge_variance)
+        # adjusted_cost = mse / (1.0 + TEXTURE_WEIGHT * edge_variance)
+
+        if edge_variance < self.dynamic_threshold:
+            # PENALTY: This is a low-texture match (like the dark floor).
+            adjusted_cost = 2 * mse / (1.0 + TEXTURE_WEIGHT * edge_variance)
+        else:
+            # REWARD: This is a high-texture match. Trust it.
+            # Standard formula: lower the cost slightly for high variance.
+            adjusted_cost = mse / (1.0 + TEXTURE_WEIGHT * edge_variance)
 
         return adjusted_cost
 
@@ -338,6 +363,18 @@ class PuzzleSolverV2:
         # IMPLEMENTATION: Look at one edge. If candidate is larger, check neighbors.
 
         sorted_frontier = sorted(self.frontier, key=lambda e: (e.x, e.y))  # Spatial sort helps chaining
+
+        # Calculate current puzzle dimensions for the Compactness Check
+        curr_width = self.max_x - self.min_x
+        curr_height = self.max_y - self.min_y
+        if curr_height == 0: curr_height = 1
+
+        # Determine if we should enforce compactness yet
+        # We start enforcing strictly after 50% of pieces are placed.
+        total_pieces = len(self.pieces)
+        placed_count = len(self.placed_pieces)
+        enforce_compactness = placed_count > (total_pieces * 0.5)
+
 
         for f_idx, edge in enumerate(sorted_frontier):
             if edge.length < MIN_EDGE_LEN: continue
@@ -451,13 +488,41 @@ class PuzzleSolverV2:
                 # This is risky. Apply a penalty to the cost to discourage it
                 # unless the match is absolutely perfect.
                 if neighbors_found == 0:
-                    cost *= 3.0  # Double the cost (making it harder to be "Best")
+                    if len(self.placed_pieces) > 6:
+                        cost *= 3.0  # Double the cost (making it harder to be "Best")
                 else:
                     cost *= 0.5  # Reward corners (halve the cost, making it preferred)
+
+                # COMPACTNESS PENALTY
+                if enforce_compactness:
+                    # Calculate new bounds if we placed this
+                    new_min_x = min(self.min_x, nx)
+                    new_max_x = max(self.max_x, nx + cand.w)
+                    new_min_y = min(self.min_y, ny)
+                    new_max_y = max(self.max_y, ny + cand.h)
+
+                    expanded_x = (new_max_x - new_min_x) > curr_width
+                    expanded_y = (new_max_y - new_min_y) > curr_height
+
+                    # 1. General Expansion Penalty (Discourage growing bounds)
+                    # We prefer filling holes (no expansion) over growing edges.
+                    if expanded_x or expanded_y:
+                        cost *= 2
+
+
+
+
+
 
                 # =================================
 
                 if cost < best_cost:
+                    if(VISUAL_DEBUG):
+                        print(f"🔄 BETTER MATCH FOUND: "
+                              f"Candidate {cand.id} (Edge {req_cand_side}) "
+                              f"beats previous best (Cost {best_cost:.2f} -> {cost:.2f}). "
+                              f"Target: Host Edge at ({edge.x}, {edge.y}). "
+                              )
                     best_cost = cost
                     best_move = (uid, target_edges_chain, (nx, ny, cand.w, cand.h))
 
@@ -654,8 +719,8 @@ class PuzzleSolverV2:
             # F. Draw ID
             cx = draw_x + w_crop // 2
             cy = draw_y + h_crop // 2
-            # cv2.putText(canvas, str(p.id), (cx - 10, cy),
-            #             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.putText(canvas, str(p.id), (cx - 10, cy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         # 4. Display
         display_scale = 0.5
@@ -787,7 +852,8 @@ class PuzzleSolverV2:
 if __name__ == "__main__":
     import sys
 
-    solver = PuzzleSolverV2(sys.argv[1] if len(sys.argv) > 1 else "puzzle.jpg")
+    solver = PuzzleSolverV2(sys.argv[1] if len(sys.argv) > 1 else ".\\day2_test\\test_irregular_translate.png")
     solver.preprocess()
+    # solver.draw_initial_state()
     solver.solve()
     solver.animate_assembly()
