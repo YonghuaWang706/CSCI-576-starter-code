@@ -509,17 +509,15 @@ class PuzzleSolverV2:
                     if expanded_x or expanded_y:
                         cost *= 2
 
-
-
-
-
-
                 # =================================
 
                 if cost < best_cost:
                     if(VISUAL_DEBUG):
+                        # Mapping: 0=Top, 1=Right, 2=Bottom, 3=Left
+                        side_labels = ["Top", "Right", "Bottom", "Left"]
+                        side_str = side_labels[req_cand_side]
                         print(f"🔄 BETTER MATCH FOUND: "
-                              f"Candidate {cand.id} (Edge {req_cand_side}) "
+                              f"Candidate {cand.id} (Edge {side_str}) "
                               f"beats previous best (Cost {best_cost:.2f} -> {cost:.2f}). "
                               f"Target: Host Edge at ({edge.x}, {edge.y}). "
                               )
