@@ -30,10 +30,16 @@ class Piece:
     image: np.ndarray
     h: int
     w: int
+    original_tl: tuple[int, int]
+    original_tr: tuple[int, int]
+    original_bl: tuple[int, int]
+    original_br: tuple[int, int]
     # 4 Edges: 0:Top, 1:Right, 2:Bottom, 3:Left
     edge_features: List[EdgeFeature] = field(default_factory=list)
     placed_x: int = 0
     placed_y: int = 0
+    initial_angle: float = 0.0  # Store the rotation angle found in preprocess
+
 
 
 @dataclass
@@ -128,6 +134,30 @@ class PuzzleSolverV2:
         self.min_x, self.max_x = 0, 0
         self.min_y, self.max_y = 0, 0
 
+    def rotate_image(self, image, angle):
+        """
+        Rotates an image around its center, expanding the canvas to fit.
+        """
+        if abs(angle) < 1.0: return image  # Optimization
+
+        h, w = image.shape[:2]
+        center = (w // 2, h // 2)
+
+        # 1. Get Rotation Matrix
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+        # 2. Calculate New Bounding Box Size
+        cos = np.abs(M[0, 0])
+        sin = np.abs(M[0, 1])
+        new_w = int((h * sin) + (w * cos))
+        new_h = int((h * cos) + (w * sin))
+
+        # 3. Adjust Matrix to Center the Image
+        M[0, 2] += (new_w / 2) - center[0]
+        M[1, 2] += (new_h / 2) - center[1]
+
+        return cv2.warpAffine(image, M, (new_w, new_h), flags=cv2.INTER_LINEAR)
+
     def preprocess(self):
         gray = cv2.cvtColor(self.original_img, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY)
@@ -155,7 +185,7 @@ class PuzzleSolverV2:
                 x, y, w, h = cv2.boundingRect(cnt)
                 piece_img = self.original_img[y:y + h, x:x + w]
 
-                p = Piece(id=i, image=piece_img, h=h, w=w)
+                p = Piece(id=i, image=piece_img, original_tl=(x, y), original_tr=(x+w, y), original_bl=(x, y+h), original_br=(x+w, y+h), h=h, w=w, initial_angle=0.0)
                 # is_tilted=False means margin=0 in extract_edge_feature
                 p.edge_features = [extract_edge_feature(piece_img, s, is_tilted=False) for s in range(4)]
 
@@ -177,7 +207,7 @@ class PuzzleSolverV2:
                 # LANCZOS4 keeps edges sharper than the default LINEAR
                 warped = cv2.warpPerspective(self.original_img, M, (width, height), flags=cv2.INTER_LANCZOS4)
 
-                p = Piece(id=i, image=warped, h=height, w=width)
+                p = Piece(id=i, image=warped, original_tl=tl, original_tr=tr, original_br=br, original_bl=bl ,h=height, w=width, initial_angle=angle)
                 p.edge_features = [extract_edge_feature(warped, s, is_tilted) for s in range(4)]
 
             self.pieces.append(p)
@@ -322,7 +352,7 @@ class PuzzleSolverV2:
             else:
                 req_cand_side = 3 if edge.direction == 1 else 1
 
-            # 2. Iterate all Unused Pieces
+            # 2. Iterate all Unused Pieces and select corresponding edge with opposite direction
             for uid in self.unused_ids:
                 cand = self.pieces[uid]
                 cand_side_len = cand.edge_features[req_cand_side].len
@@ -357,11 +387,11 @@ class PuzzleSolverV2:
                             target_edges_chain.append(next_edge)
                             current_chain_len += next_edge.length
                             found_next = True
-                            break  # Found one neighbor, simplified loop
+                            break  # Found one neighbor with next_start_x and next_start_y, simplified loop
 
                     if not found_next:
                         chain_valid = False  # Gap is too big, no neighbor found
-
+                # go to next unused piece
                 if not chain_valid: continue
                 if cand_side_len > current_chain_len + 5: continue  # Still too big
 
@@ -518,7 +548,8 @@ class PuzzleSolverV2:
                 break
 
         print("🏁 Done!")
-        self.draw_debug_view(final=True)
+        if VISUAL_DEBUG:
+            self.draw_debug_view(final=True)
         cv2.waitKey(0)
 
     def draw_debug_view(self, final=False):
@@ -545,6 +576,213 @@ class PuzzleSolverV2:
         disp = cv2.resize(canvas, (int(w * DEBUG_SCALE), int(h * DEBUG_SCALE)))
         cv2.imshow("Puzzle Solver V2", disp)
 
+    def draw_initial_state(self):
+        """
+        Draws all extracted pieces at their ORIGINAL positions and ROTATION
+        by cropping the raw bounding box directly from the original input image.
+        """
+        if not self.pieces:
+            print("⚠️ No pieces to draw. Run preprocess() first.")
+            return
+
+        print(f"🎨 Drawing {len(self.pieces)} pieces in their original rotated state...")
+
+        # 1. Determine Canvas Size
+        # Find global min/max coordinates across ALL corners of ALL pieces
+        min_gx, min_gy = float('inf'), float('inf')
+        max_gx, max_gy = float('-inf'), float('-inf')
+
+        for p in self.pieces:
+            xs = [p.original_tl[0], p.original_tr[0], p.original_bl[0], p.original_br[0]]
+            ys = [p.original_tl[1], p.original_tr[1], p.original_bl[1], p.original_br[1]]
+
+            min_gx = min(min_gx, min(xs))
+            min_gy = min(min_gy, min(ys))
+            max_gx = max(max_gx, max(xs))
+            max_gy = max(max_gy, max(ys))
+
+        # 2. Create Canvas
+        pad = 50
+        canvas_w = int(max_gx - min_gx + (pad * 2))
+        canvas_h = int(max_gy - min_gy + (pad * 2))
+
+        # Use a generic gray background to differentiate from piece background
+        canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+
+        # 3. Draw Pieces
+        for p in self.pieces:
+            # A. Calculate Local Bounding Box of the rotated piece
+            xs = [p.original_tl[0], p.original_tr[0], p.original_bl[0], p.original_br[0]]
+            ys = [p.original_tl[1], p.original_tr[1], p.original_bl[1], p.original_br[1]]
+
+            bx_min, by_min = int(min(xs)), int(min(ys))
+            bx_max, by_max = int(max(xs)), int(max(ys))
+
+            # B. Crop from Original Image (The Raw Rotated Pixel Data)
+            # Ensure we don't go out of bounds of the original image
+            h_orig, w_orig = self.original_img.shape[:2]
+            src_x1 = max(0, bx_min)
+            src_y1 = max(0, by_min)
+            src_x2 = min(w_orig, bx_max)
+            src_y2 = min(h_orig, by_max)
+
+            raw_piece_img = self.original_img[src_y1:src_y2, src_x1:src_x2]
+
+            if raw_piece_img.size == 0: continue
+
+            # C. Calculate Paste Location on New Canvas
+            draw_x = int(src_x1 - min_gx + pad)
+            draw_y = int(src_y1 - min_gy + pad)
+
+            h_crop, w_crop = raw_piece_img.shape[:2]
+
+            # D. Paste the Raw Crop
+            if draw_y + h_crop <= canvas_h and draw_x + w_crop <= canvas_w:
+                canvas[draw_y:draw_y + h_crop, draw_x:draw_x + w_crop] = raw_piece_img
+
+            # E. Draw Red Boundary Box (Visual Confirmation)
+            pts = np.array([
+                p.original_tl, p.original_tr, p.original_br, p.original_bl
+            ], dtype=np.int32)
+
+            # Shift points to canvas space
+            pts[:, 0] -= int(min_gx - pad)
+            pts[:, 1] -= int(min_gy - pad)
+
+            # cv2.polylines(canvas, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
+
+            # F. Draw ID
+            cx = draw_x + w_crop // 2
+            cy = draw_y + h_crop // 2
+            # cv2.putText(canvas, str(p.id), (cx - 10, cy),
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        # 4. Display
+        display_scale = 0.5
+        disp_w = int(canvas_w * display_scale)
+        disp_h = int(canvas_h * display_scale)
+        disp = cv2.resize(canvas, (disp_w, disp_h))
+
+        cv2.imshow("Initial State (Original Rotated)", disp)
+        cv2.waitKey(0)
+
+    def animate_assembly(self):
+        """
+        Animates pieces flying AND rotating from their original state to the solution.
+        """
+        if not self.placed_pieces:
+            print("⚠️ No solved pieces to animate.")
+            return
+
+        print("🎥 Starting Assembly Animation (Translation + Rotation)...")
+
+        # 1. Setup Canvas
+        padding = 100
+        sol_w = self.max_x - self.min_x + (padding * 2)
+        sol_h = self.max_y - self.min_y + (padding * 2)
+        ox = -self.min_x + padding
+        oy = -self.min_y + padding
+
+        total_frames = 120  # 4 seconds
+
+        # Pre-calculate Start/End Centers for all pieces to save CPU in loop
+        piece_paths = []
+        for p in self.placed_pieces:
+            # START: Center of the original rotated box
+            # Average of the 4 original corners
+            start_cx = (p.original_tl[0] + p.original_br[0]) / 2
+            start_cy = (p.original_tl[1] + p.original_br[1]) / 2
+
+            # END: Center of the placed (upright) piece
+            # p.placed_x is Top-Left, so add half width/height
+            end_cx = (p.placed_x + ox) + (p.w / 2)
+            end_cy = (p.placed_y + oy) + (p.h / 2)
+
+            piece_paths.append({
+                'p': p,
+                'start': (start_cx, start_cy),
+                'end': (end_cx, end_cy),
+                'angle': p.initial_angle
+            })
+
+        # 2. Animation Loop
+        for frame in range(total_frames + 1):
+            t = frame / total_frames
+            # Ease-out (fast start, slow stop)
+            t_smooth = 1 - (1 - t) ** 3
+
+            canvas = np.zeros((sol_h, sol_w, 3), dtype=np.uint8)
+
+            for item in piece_paths:
+                p = item['p']
+                sx, sy = item['start']
+                ex, ey = item['end']
+
+                # A. Interpolate Center
+                cur_cx = sx + (ex - sx) * t_smooth
+                cur_cy = sy + (ey - sy) * t_smooth
+
+                # B. Interpolate Angle
+                # We go from p.initial_angle -> 0 degrees
+                cur_angle = item['angle'] * (1 - t_smooth)
+
+                # C. Rotate the Piece Image
+                # We take the upright p.image and rotate it "back" towards initial,
+                # then slowly rotate it to 0.
+                img_to_draw = self.rotate_image(p.image, cur_angle)
+
+                # D. Calculate Top-Left based on New Center & New Size
+                h_img, w_img = img_to_draw.shape[:2]
+                draw_x = int(cur_cx - (w_img / 2))
+                draw_y = int(cur_cy - (h_img / 2))
+
+                # E. Draw (with Clipping)
+                if draw_x < sol_w and draw_y < sol_h and draw_x + w_img > 0 and draw_y + h_img > 0:
+                    x1 = max(0, draw_x)
+                    y1 = max(0, draw_y)
+                    x2 = min(sol_w, draw_x + w_img)
+                    y2 = min(sol_h, draw_y + h_img)
+
+                    src_x1 = x1 - draw_x
+                    src_y1 = y1 - draw_y
+                    src_x2 = src_x1 + (x2 - x1)
+                    src_y2 = src_y1 + (y2 - y1)
+
+                    # Basic transparency check (optional): masking black pixels
+                    # For simple blit:
+                    try:
+                        patch = img_to_draw[src_y1:src_y2, src_x1:src_x2]
+                        target = canvas[y1:y2, x1:x2]
+
+                        # Simple mask to allow non-rectangular shapes if source has black bg
+                        gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+                        _, mask = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
+
+                        # Background where mask is 0
+                        bg = cv2.bitwise_and(target, target, mask=cv2.bitwise_not(mask))
+                        # Foreground where mask is 1
+                        fg = cv2.bitwise_and(patch, patch, mask=mask)
+
+                        canvas[y1:y2, x1:x2] = cv2.add(bg, fg)
+                    except:
+                        pass  # avoid crash on sub-pixel rounding errors
+
+            # F. Show Frame
+            display_scale = 0.8
+            disp_w = int(sol_w * display_scale)
+            disp_h = int(sol_h * display_scale)
+            disp = cv2.resize(canvas, (disp_w, disp_h))
+
+            cv2.imshow("Puzzle Assembly", disp)
+            if frame == 0:
+                print("⏸️  Paused at start. Press any key to begin animation...")
+                cv2.waitKey(0)  # Indefinite wait
+            else:
+                cv2.waitKey(16)  # ~60 FPS wait for animation
+
+        print("🎉 Animation Complete!")
+        cv2.waitKey(0)
+
 
 if __name__ == "__main__":
     import sys
@@ -552,3 +790,4 @@ if __name__ == "__main__":
     solver = PuzzleSolverV2(sys.argv[1] if len(sys.argv) > 1 else "puzzle.jpg")
     solver.preprocess()
     solver.solve()
+    solver.animate_assembly()
