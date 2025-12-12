@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 # ================= Configuration =================
-VISUAL_DEBUG = True
+VISUAL_DEBUG = False
 DEBUG_SCALE = 0.6
 STEP_SPEED_MS = 0  # 0 = Wait for keypress (Step-by-step mode)
 MIN_EDGE_LEN = 10  # Minimum pixels to consider a valid edge
@@ -69,7 +69,6 @@ def get_gradient_profile(pixels: np.ndarray) -> Tuple[np.ndarray, float]:
 def extract_edge_feature(img: np.ndarray, side: int, is_tilted: bool) -> EdgeFeature:
     h, w = img.shape[:2]
 
-    # === DYNAMIC MARGIN ===
     # If tilted, we skip 1px to avoid rotation artifacts (black halos).
     # If straight, we use 0px to preserve every bit of valid texture data.
     margin = 1 if is_tilted else 0
@@ -183,7 +182,7 @@ class PuzzleSolverV2:
         for i, cnt in enumerate(contours):
             if cv2.contourArea(cnt) < 500: continue
 
-            # --- A. NO-TILT PATH (CROP) ---
+            # NO-TILT PATH (CROP)
             if not is_tilted:
                 # When the entire set is NOT tilted, we use bounding rect CROP for pixel perfection
                 x, y, w, h = cv2.boundingRect(cnt)
@@ -193,7 +192,7 @@ class PuzzleSolverV2:
                 # is_tilted=False means margin=0 in extract_edge_feature
                 p.edge_features = [extract_edge_feature(piece_img, s, is_tilted=False) for s in range(4)]
 
-            # --- B. TILTED PATH (WARP) ---
+            # TILTED PATH (WARP)
             else:
 
                 rect = cv2.minAreaRect(cnt)
@@ -492,6 +491,11 @@ class PuzzleSolverV2:
                         cost *= 3.0  # Double the cost (making it harder to be "Best")
                 else:
                     cost *= 0.5  # Reward corners (halve the cost, making it preferred)
+
+                ## we favor exact match for edges' lengths after hale pieces have been placed
+                if len(self.placed_pieces) > len(self.pieces) * 0.5:
+                    if abs(edge.length-cand_side_len > 5):
+                        cost *= 1.5
 
                 # COMPACTNESS PENALTY
                 if enforce_compactness:
