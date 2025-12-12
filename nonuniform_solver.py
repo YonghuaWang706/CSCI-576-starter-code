@@ -210,7 +210,11 @@ class PuzzleSolverV2:
                 # LANCZOS4 keeps edges sharper than the default LINEAR
                 warped = cv2.warpPerspective(self.original_img, M, (width, height), flags=cv2.INTER_LANCZOS4)
 
-                p = Piece(id=i, image=warped, original_tl=tl, original_tr=tr, original_br=br, original_bl=bl ,h=height, w=width, initial_angle=angle)
+                dy = tr[1] - tl[1]
+                dx = tr[0] - tl[0]
+                true_angle = np.degrees(np.arctan2(dy, dx))
+
+                p = Piece(id=i, image=warped, original_tl=tl, original_tr=tr, original_br=br, original_bl=bl ,h=height, w=width, initial_angle=true_angle)
                 p.edge_features = [extract_edge_feature(warped, s, is_tilted) for s in range(4)]
 
             self.pieces.append(p)
@@ -743,12 +747,35 @@ class PuzzleSolverV2:
 
         print("🎥 Starting Assembly Animation (Translation + Rotation)...")
 
-        # 1. Setup Canvas
+        # 1. Calculate Bounds of the "Input World" (Original positions)
+        min_in_x, min_in_y = float('inf'), float('inf')
+        max_in_x, max_in_y = float('-inf'), float('-inf')
+
+        for p in self.placed_pieces:
+            # Check all 4 corners to be safe, or just TL/BR
+            xs = [p.original_tl[0], p.original_tr[0], p.original_bl[0], p.original_br[0]]
+            ys = [p.original_tl[1], p.original_tr[1], p.original_bl[1], p.original_br[1]]
+            min_in_x = min(min_in_x, min(xs))
+            min_in_y = min(min_in_y, min(ys))
+            max_in_x = max(max_in_x, max(xs))
+            max_in_y = max(max_in_y, max(ys))
+
+        # 2. Calculate Union Bounds (Input World + Solution World)
+        # self.min_x/max_x are the bounds of the solved puzzle relative to seed (0,0)
+        global_min_x = min(self.min_x, min_in_x)
+        global_min_y = min(self.min_y, min_in_y)
+        global_max_x = max(self.max_x, max_in_x)
+        global_max_y = max(self.max_y, max_in_y)
+
+        # 3. Define Canvas Size & Offset
         padding = 100
-        sol_w = self.max_x - self.min_x + (padding * 2)
-        sol_h = self.max_y - self.min_y + (padding * 2)
-        ox = -self.min_x + padding
-        oy = -self.min_y + padding
+        sol_w = int(global_max_x - global_min_x + (padding * 2))
+        sol_h = int(global_max_y - global_min_y + (padding * 2))
+
+        # The offset shifts the entire coordinate system so 'global_min' is at (padding, padding)
+        ox = -global_min_x + padding
+        oy = -global_min_y + padding
+        # ===========================================================
 
         total_frames = 120  # 4 seconds
 
